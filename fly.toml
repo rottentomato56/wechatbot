@@ -1,0 +1,20 @@
+# fly.toml app configuration file generated for autumn-bird-3479 on 2023-06-17T16:02:25-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = "autumn-bird-3479"
+primary_region = "sin"
+
+[build]
+  builder = "paketobuildpacks/builder:base"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0

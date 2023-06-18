@@ -6,8 +6,7 @@ import re
 import ffmpeg
 
 # play.ht voice models for chinese
-
-models = [
+MODELS = [
     'zh-CN_LiNaVoice',
     'zh-CN_ZhangJingVoice',
     'zh-CN-XiaoxiaoNeural',
@@ -23,14 +22,14 @@ models = [
 
 CHINESE_MODEL = 'zh-CN-XiaomoNeural'
 
+CONVERSION_URL = 'https://play.ht/api/v1/convert'
+
 def text_to_speech(message, model=CHINESE_MODEL):
     message = prepare_text(message)
-    url = "https://play.ht/api/v1/convert"
 
     payload = {
         'content': [message],
-        'voice': model,
-        'globalSpeed': '90%'
+        'voice': model
     }
 
     headers = {
@@ -40,7 +39,7 @@ def text_to_speech(message, model=CHINESE_MODEL):
         "X-USER-ID": settings.VOICE_AI_USER_ID
     }
 
-    response = requests.post(url, json=payload, headers=headers)
+    response = requests.post(CONVERSION_URL, json=payload, headers=headers)
 
     transcription_id = response.json().get('transcriptionId')
 

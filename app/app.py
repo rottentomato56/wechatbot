@@ -3,8 +3,7 @@ import hashlib
 import xmltodict
 import re
 from fastapi import FastAPI, Request, Response, HTTPException, BackgroundTasks, Depends
-from pydantic import BaseModel
-from langchain.memory import RedisChatMessageHistory
+from fastapi.middleware.cors import CORSMiddleware
 
 import wechat
 import english_assistant
@@ -13,33 +12,17 @@ from db import cache
 
 app = FastAPI()
 
-class UserMessage(BaseModel):
-    content: str
-    user_id: int
-    timestamp: int = None
-
-@app.post('/chat')
-async def chat(user_message: UserMessage):
-    user_id = user_message.user_id
-    print(user_message)
-
-    history = RedisChatMessageHistory(url=settings.REDIS_URL, session_id=str(user_id), ttl=86400)
-    history.add_user_message(user_message.content)
-    # kick off background task to process messages
-    # delay by 5 seconds
-    print(history.messages)
-    raise
-
-    # response = chatbot(conversation)
-    # history.add_ai_message(response.content)
-    # return jsonify({'response': response.content})
+origins = ['*']
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
 
 
 ############ chatbot functions ###################
-
-# The WeChat server will issue a GET request in order to verify the chatbot backend server upon configuration.
-# See: http://admin.wechat.com/wiki/index.php?title=Getting_Started#Step_2._Verify_validity_of_the_URL
-# and: http://admin.wechat.com/wiki/index.php?title=Message_Authentication
 
 # Dependency
 def get_session():
@@ -49,8 +32,14 @@ def get_session():
     finally:
         session.close()
 
+# The WeChat server will issue a GET request in order to verify the chatbot backend server upon configuration.
+# See: http://admin.wechat.com/wiki/index.php?title=Getting_Started#Step_2._Verify_validity_of_the_URL
+# and: http://admin.wechat.com/wiki/index.php?title=Message_Authentication
+
 @app.get('/wechat')
 async def wechat_get(signature, echostr, timestamp, nonce):
+    """ this method verifies the server with wechat platform """
+
     # Compute the signature (note that the shared token is used too)
     verification_elements = [settings.WECHAT_BOT_TOKEN, timestamp, nonce]
     verification_elements.sort()
