@@ -66,7 +66,6 @@ def text_to_speech(message, model=CHINESE_MODEL):
             job_done = True
             audio_file = response.json().get('audioUrl')
             audio_duration = response.json().get('audioDuration')
-            print(audio_duration, 'duration')
         else:
             time.sleep(2)
 
