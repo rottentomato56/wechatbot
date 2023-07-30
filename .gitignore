@@ -16,5 +16,3 @@ build/
 .DS_STORE
 
 .env
-app/settings.py
-fly.toml
