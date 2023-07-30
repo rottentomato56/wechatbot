@@ -4,6 +4,12 @@ import settings
 import time
 import re
 import ffmpeg
+import openai
+import wechat
+from pydub import AudioSegment
+from hanziconv import HanziConv
+
+openai.api_key = settings.OPENAI_API_KEY
 
 # play.ht voice models for chinese
 MODELS = [
@@ -99,6 +105,37 @@ def prepare_text(text):
 def test():
     s = '你可以学习这个短语 "self-care"（自我关怀）来描述一个人照顾自己身心健康的行为和习惯。例如，你可以说 "Practicing self-care is important for maintaining a healthy lifestyle."（实施自我关怀对于保持健康的生活方式很重要）。这个短语可以帮助你学习如何照顾自己的身心健康，与"laughter is the best medicine" 相关。你可以学习这个短语 "self-care"（自我关怀）来描述一个人照顾自己身心健康的行为和习惯。例如，你可以说 "Practicing self-care is important for maintaining a healthy lifestyle."（实施自我关怀对于保持健康的生活方式很重要）。这个短语可以帮助你学习如何照顾自己的身心健康，与"laughter is the best medicine" 相关。你可以学习这个短语 "self-care"（自我关怀）来描述一个人照顾自己身心健康的行为和习惯。例如，你可以说 "Practicing self-care is important for maintaining a healthy lifestyle."（实施自我关怀对于保持健康的生活方式很重要）。这个短语可以帮助你学习如何照顾自己的身心健康，与"laughter is the best medicine" 相关。'
     return text_to_speech(s)
+
+
+def get_voice_message(media_id):
+    file_id = str(media_id).replace('-', '')
+    file_id = 'sample'
+    access_token = wechat.get_access_token()
+    url = f'https://api.weixin.qq.com/cgi-bin/media/get?access_token={access_token}&media_id={media_id}'
+    response = requests.get(url)
+    amr_in = file_id + '.amr'
+    mp3_out = file_id + '.mp3'
+    with open(amr_in, 'wb') as f:
+        f.write(response.content)
+
+    amr_audio = AudioSegment.from_file(amr_in, format='amr')
+    mp3_audio = amr_audio.export(mp3_out, format='mp3')
+    transcript = openai.Audio.transcribe('whisper-1', mp3_audio)
+    text = transcript.get('text')
+    return text
+
+
+def transcribe_audio(amr_in):
+    file_id = os.path.basename(amr_in).replace('.amr', '')
+    mp3_out = file_id + '.mp3'
+
+    amr_audio = AudioSegment.from_file(amr_in, format='amr')
+    mp3_audio = amr_audio.export(mp3_out, format='mp3')
+    transcript = openai.Audio.transcribe('whisper-1', mp3_audio)
+    text = transcript.get('text')
+    os.remove(amr_in)
+    os.remove(mp3_out)
+    return text
 
 
 

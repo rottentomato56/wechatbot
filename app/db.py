@@ -4,20 +4,18 @@ from sqlalchemy import create_engine, desc
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime, Text, UnicodeText
-from sqlalchemy.sql import func 
+from sqlalchemy.sql import func
 
-engine = create_engine(settings.SQLALCHEMY_DATABASE_URL)
+engine = create_engine(settings.SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
-
-cache = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 class User(Base):
     __tablename__ = 'users'
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True) # for wechat users it is openid, otherwise 'system' or 'ai'
+    username = Column(String, unique=True, index=True) # for users it is wechat openid, otherwise 'bot'
     date_joined = Column(DateTime(timezone=True), server_default=func.now())
 
 class Message(Base):
@@ -34,8 +32,7 @@ class Message(Base):
     msg_type = Column(String, default='text')
     time_sent = Column(DateTime(timezone=True), server_default=func.now())
     content = Column(UnicodeText)
-    media_id = Column(String) # used for wechat for voice/img/video messages
-
+    media_id = Column(String) # used by wechat for voice/img/video messages
 
 def create_tables():
     Base.metadata.create_all(engine)
@@ -56,7 +53,13 @@ def log_message(session, sender, receiver, **kwargs):
     content=kwargs.get('content')
     msg_type = kwargs.get('msg_type', 'text')
     media_id = kwargs.get('media_id')
-    message = Message(sender=sender, receiver=receiver, msg_type=msg_type, content=content, media_id=media_id)
+    message = Message(
+        sender=sender, 
+        receiver=receiver, 
+        msg_type=msg_type, 
+        content=content, 
+        media_id=media_id
+    )
     session.add(message)
     session.commit()
     session.refresh(message)
@@ -73,5 +76,11 @@ def init_db():
     session.close()
     return True
 
+def get_session():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-
+cache = redis.from_url(settings.REDIS_URL, decode_responses=True)

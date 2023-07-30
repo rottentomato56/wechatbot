@@ -1,19 +1,16 @@
 import settings
 import wechat
 import requests
+import os
+import voice_assistant
 from langchain.chat_models import ChatOpenAI
 from langchain.chains import ConversationChain
-from langchain.memory import ConversationBufferMemory, ConversationBufferWindowMemory, RedisChatMessageHistory
+from langchain.memory import ConversationBufferWindowMemory, RedisChatMessageHistory
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.prompts import PromptTemplate
+from db import cache
+from wechat import ChatBot
 
-
-llm = ChatOpenAI(
-    temperature=0.7,
-    model='gpt-3.5-turbo-16k-0613',
-    openai_api_key=settings.OPENAI_API_KEY,
-    max_tokens=2500,
-)
 
 ENGLISH_AI_TEMPLATE = """
 You are an English teaching assistant named Bella tasked with helping Chinese students understand English phrases and conversations.
@@ -79,31 +76,6 @@ def add_assistant_message(username, message):
     history.add_ai_message(message)
     return
 
-def get_response(username, user_message):
-
-    session_id = settings.REDIS_KEY_PREFIX + username
-    history = RedisChatMessageHistory(url=settings.REDIS_URL, session_id=session_id, ttl=86400)
-    memory = ConversationBufferWindowMemory(k=3, ai_prefix='Assistant', human_prefix='Student', chat_memory=history)
-    
-    conversation = ConversationChain(
-        prompt=PROMPT,
-        llm=llm, 
-        verbose=settings.ENV == 'dev',
-        memory=memory
-    )
-
-    result = conversation.predict(input=user_message)
-    if settings.ENV == 'dev':
-        print('Assistant: ', result)
-    return result
-
-def respond_to(from_user, user_message):
-    # result = get_response(from_user, user_message)
-    # # need to check for success
-    # response = wechat.send_async_text_response(result, from_user)
-    result = get_streaming_response(from_user, user_message)
-    return True
-
 def is_split_point(current_message, token):
     """
     takes a token and a current_message and checks to see if
@@ -135,49 +107,147 @@ def is_split_point(current_message, token):
 
     return output_message, leftover_message
 
-class MyCustomHandler(BaseCallbackHandler):
-    def __init__(self, username):
+class StreamingHandler(BaseCallbackHandler):
+    def __init__(self, response_fn):
         self.message = ''
         self.message_chunk = ''
-        self.username = username
+        self.response_fn = response_fn
 
-    def on_llm_new_token(self, token: str, **kwargs):
+    def on_llm_new_token(self, token, **kwargs):
         output_message, leftover_message = is_split_point(self.message_chunk, token)
         if output_message:
-            wechat.send_async_text_response(output_message.strip(), self.username, send_voice=False)
+            self.response_fn(output_message.strip())
             self.message_chunk = leftover_message
         else:
             self.message_chunk += token
             
-
     def on_llm_end(self, response, **kwargs):
-        wechat.send_async_text_response(self.message_chunk.strip(), self.username, send_voice=False)
+        self.response_fn(self.message_chunk.strip())
 
+INTRO_MESSAGE = """你好！我是你的私人英语助手，帮你理解日常生活中遇到的任何有关英语的问题。你可以使用菜单下的功能：
 
-def get_streaming_response(from_user, user_message):
+[翻译解释] - 我帮你翻译或者解释某个英文词或句子
+[英文表达] - 我来教你用英文表达某句中文话
 
-    llm = ChatOpenAI(
-        temperature=0.7,
-        model='gpt-3.5-turbo-16k-0613',
-        openai_api_key=settings.OPENAI_API_KEY,
-        max_tokens=2500,
-        streaming=True,
-        callbacks=[MyCustomHandler(from_user)]
-    )
+并且你可以直接问我问题， 比如:
+1. bite the bullet 是什么意思?
+2. 怎么用英文说 "我这几天有点不舒服，明天可能来不了你的家"?
+3. 解释一下这句话: I\'m looking forward to our meeting tomorrow.
 
-    session_id = settings.REDIS_KEY_PREFIX + from_user
-    history = RedisChatMessageHistory(url=settings.REDIS_URL, session_id=session_id, ttl=86400)
-    memory = ConversationBufferWindowMemory(k=3, ai_prefix='Assistant', human_prefix='Student', chat_memory=history)
+你有什么关于英语的问题吗?"""
+
+class EnglishBot(ChatBot):
+
+    def __init__(self, username):
+        super().__init__(username)
+        self.session_cache_key = 'session:' + self.username
+        self.intro_message = INTRO_MESSAGE
+
+    def get_auto_response(self, event_key):
+        predefined_responses = {
+            'explain': '[帮我解释下面这个英文句子]\n\n好的，你要我解释什么英文句子？直接发给我就行了',
+            'english_equivalent': '[用英文表达]\n\n好的，你要我教你用英文表达什么中文句子？直接发给我就行了'
+        }
+
+        attached_messages = {
+            'explain': '这句话是什么意思?',
+            'english_equivalent': '怎么用英文表达这句话?'
+        }
+
+        self.attached_message = attached_messages.get(event_key, '')
+        return predefined_responses.get(event_key)
+
+    def respond(self, user_message, response_type='text'):
+        if self.attached_message:
+            user_message = self.attached_message + '\n' + user_message
+
+        if response_type == 'text':
+            llm = ChatOpenAI(
+                temperature=0.7,
+                model='gpt-3.5-turbo-16k-0613',
+                openai_api_key=settings.OPENAI_API_KEY,
+                max_tokens=2500,
+                streaming=True,
+                callbacks=[StreamingHandler(self.send_async_text_response)]
+            )
+            
+        elif response_type == 'voice':
+            llm = ChatOpenAI(
+                temperature=0.7,
+                model='gpt-3.5-turbo-16k-0613',
+                openai_api_key=settings.OPENAI_API_KEY,
+                max_tokens=2500
+            )
+
+        message_history = RedisChatMessageHistory(url=settings.REDIS_URL, session_id=self.session_cache_key, ttl=86400)
+        memory = ConversationBufferWindowMemory(k=3, ai_prefix='Assistant', human_prefix='Student', chat_memory=message_history)
+        
+        conversation = ConversationChain(
+            prompt=PROMPT,
+            llm=llm, 
+            verbose=settings.ENV == 'dev',
+            memory=memory
+        )
+
+        result = conversation.predict(input=user_message)
+        if settings.ENV == 'dev':
+            print('Assistant: ', result)
+
+        if response_type == 'voice':
+            self.send_async_voice_response(result)
+
+        # except:
+        #     reply = '对不起， 碰到了一点问题。请再试一遍'
+        #     result = self.send_async_text_response(reply)
+        self.attached_message = ''
+        self.state = 'listening'
+        return result
     
-    conversation = ConversationChain(
-        prompt=PROMPT,
-        llm=llm, 
-        verbose=settings.ENV == 'dev',
-        memory=memory
-    )
+    def respond_to_audio(self, media_id):
+        message = self.get_voice_message(media_id)
+        print('transcription:', message)
+        result = self.respond(message)
+        return result
 
-    result = conversation.predict(input=user_message)
-    if settings.ENV == 'dev':
-        print('Assistant: ', result)
-    return result
+def update_menu():
+    
+    access_token = cache.get(wechat.TOKEN_CACHE_KEY)
+    data = {
+        'button': [
+            {
+                'name': '功能介绍',
+                'type': 'click',
+                'key': 'tutorial'
+            },
+            {
+                'name': '功能',
+                'sub_button': [
+                    {
+                        'name': '翻译解释',
+                        'type': 'click',
+                        'key': 'explain'
+                    },
+                    {
+                        'name': '英文表达',
+                        'type': 'click',
+                        'key': 'english_equivalent'
+                    },
+                    # {
+                    #     'name': '教我相关词',
+                    #     'type': 'click',
+                    #     'key': 'similar'
+                    # },
+                    # {
+                    #     'name': '用语音重复',
+                    #     'type': 'click',
+                    #     'key': 'voice'
+                    # }
+                ]
+            }
+        ]
+    }
+
+    url = f'https://api.weixin.qq.com/cgi-bin/menu/create?access_token={access_token}'
+    response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8')).text
+    return response
 

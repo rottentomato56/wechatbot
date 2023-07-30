@@ -1,16 +1,37 @@
 version: '3.6'
+name: 'wechatbot'
 
 services:
 
-  wechatbot:
+  app:
     build: ./
     restart: always
-    container_name: wechatbot
+    depends_on:
+      - postgres
+      - redis
     ports:
       - "8000:8000"
     volumes:
       - ./app:/src/app
-    env_file: 
+    environment:
+      - SQLALCHEMY_DATABASE_URL=postgresql://default:wechatbot@postgres:5432/wechatbot
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
       - .env
     command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
-    
+
+  postgres:
+    image: postgres:14-alpine
+    restart: always
+    volumes:
+      - ../data/postgres:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_PASSWORD=wechatbot
+      - POSTGRES_USER=default
+      - POSTGRES_DB=wechatbot
+
+  redis:
+    image: redis:6.2-alpine
+    restart: always
+    volumes:
+      - ../data/redis:/data

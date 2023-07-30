@@ -1,242 +1,214 @@
 import requests
 import json
 import time
-import openai
 import os
-import voice_assistant
-
 import settings
+import voice_assistant
 import db
 from db import cache
 from fastapi import Response
-
-BOT_STATE_PREFIX = 'bot_state_'
-
-def get_access_token(force_refresh=False):
-    token = cache.get('wechat_token')
-    if force_refresh or not token:
-        s = requests.Session()
-
-        response = s.get('https://api.weixin.qq.com/cgi-bin/token', params={
-            'grant_type': 'client_credential',
-            'appid': settings.WECHAT_ADMIN_APPID,
-            'secret': settings.WECHAT_ADMIN_SECRET,
-        }).json()
-        token = response['access_token']
-        cache.set('wechat_token', token, 6000)
-
-    return token
-
-def validate_message(message):
-    # Check if the message XML is valid, this simple bot handles TEXT messages only!
-    # To learn more about the supported types of messages and how to implement them, see:
-    # Common Messages: http://admin.wechat.com/wiki/index.php?title=Common_Messages
-    # Event Messages: http://admin.wechat.com/wiki/index.php?title=Event-based_Messages
-    # Speech Recognition Messages: http://admin.wechat.com/wiki/index.php?title=Speech_Recognition_Messages
-    return (
-        message != None and
-        message['xml'] != None and
-        message['xml']['MsgType'] != None and
-        message['xml']['MsgType'] == 'text' and
-        message['xml']['Content'] != None
-    )
-
-# Format the reply according to the WeChat XML format for synchronous replies,
-# see: http://admin.wechat.com/wiki/index.php?title=Callback_Messages
-def format_message(original_message, content):
-    return (
-        "<xml>"
-        "<ToUserName><![CDATA[%s]]></ToUserName>"
-        "<FromUserName><![CDATA[%s]]></FromUserName>"
-        "<CreateTime>%s</CreateTime>"
-        "<MsgType><![CDATA[text]]></MsgType>"
-        "<Content><![CDATA[%s]]></Content>"
-        "</xml>"
-    ) % (
-        original_message['xml']['FromUserName'], # From and To must be inverted in replies ;)
-        original_message['xml']['ToUserName'], # Same as above!
-        time.gmtime(),
-        content
-    )
-
-def send_direct_text_response(session, to_user, reply, original_message, next_state='listening'):
-    """
-    to_user: openid of the receiver
-    
-    """
-    bot_state_key = BOT_STATE_PREFIX + to_user
-    user = db.get_or_create_user(session, to_user)
-    system = db.get_or_create_user(session, 'system')
-    resp = format_message(original_message, reply)
-    db.log_message(session, system, user, content=reply, msg_type='text')
-    if next_state:
-        cache.set(bot_state_key, next_state)
-    return Response(content=resp, status_code=200)
-
-def send_async_text_response(message, to_user, from_user='assistant', send_voice=True):
-    session = db.SessionLocal()
-    user = db.get_or_create_user(session, to_user)
-    sender = db.get_or_create_user(session, from_user)
-
-    access_token = get_access_token()
-    url = 'https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=%s' % (access_token, )
-    data = {
-        'touser': to_user,
-        'msgtype':'text',
-        'text':
-        {
-            'content': message
-        }
-    }
-    headers = {'Content-type': 'application/json', 'Accept': 'text/plain'}
-    response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8'), headers=headers)
-    print('Send msg response', response.json())
-
-    db.log_message(session, sender, user, content=message, msg_type='text')
-
-    if voice_assistant.has_english(message) and send_voice:
-        text = voice_assistant.prepare_text(message)
-        audio_file = voice_assistant.text_to_speech(text)
-        voice_send_response = send_async_voice_response(audio_file, to_user)
-        print(voice_send_response)
-
-    session.close()
-    bot_state_key = BOT_STATE_PREFIX + to_user 
-    cache.set(bot_state_key, 'listening')
-    return response
-
-def send_async_voice_response(audio_file, to_user):
-    access_token = get_access_token()
-    upload_audio_url = f'https://api.weixin.qq.com/cgi-bin/media/upload?access_token={access_token}&type=voice'
-    with open(audio_file, 'rb') as f:
-        send_files = {'media': (audio_file, f, 'audio/mpeg')}
-        response = requests.post(upload_audio_url, files=send_files)
-    media_id = response.json().get('media_id')
-
-    url = 'https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=%s' % (access_token, )
-    data = {
-        'touser': to_user,
-        'msgtype':'voice',
-        'voice': {'media_id': media_id}
-    }
-    headers = {'Content-type': 'application/json', 'Accept': 'text/plain'}
-    response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8'), headers=headers)
-    return response
-
-# INTRO_MESSAGE = """你好！我是 Bella，你的私人英语助手，帮你理解日常生活中遇到的任何有关英语的问题。你可以使用菜单下的功能：
-
-# [翻译解释] - 我帮你翻译或者解释某个英文词或句子
-# [英文表达] - 我来教你用英文表达某句中文话
-# [教我相关词] - 我会教你一句跟你之前问过相关的英语短语
-# [用语音重复] - 我用语音重复我最近发给你的信息
-
-# 并且你可以直接问我问题， 比如:
-# 1. bite the bullet 是什么意思?
-# 2. 怎么用英文说 "我这几天有点不舒服，明天可能来不了你的家"?
-# 3. 解释一下这句话: I\'m looking forward to our meeting tomorrow.
-
-# 你有什么关于英语的问题吗?"""
-
-
-INTRO_MESSAGE = """你好！我是 Bella，你的私人英语助手，帮你理解日常生活中遇到的任何有关英语的问题。你可以使用菜单下的功能：
-
-[翻译解释] - 我帮你翻译或者解释某个英文词或句子
-[英文表达] - 我来教你用英文表达某句中文话
-
-并且你可以直接问我问题， 比如:
-1. bite the bullet 是什么意思?
-2. 怎么用英文说 "我这几天有点不舒服，明天可能来不了你的家"?
-3. 解释一下这句话: I\'m looking forward to our meeting tomorrow.
-
-你有什么关于英语的问题吗?"""
-
-
-def update_menu():
-    access_token = get_access_token()
-    data = {
-        'button': [
-             {
-                'name': '功能介绍',
-                'type': 'click',
-                'key': 'tutorial'
-            },
-            {
-                'name': '功能',
-                'sub_button': [
-                    {
-                        'name': '翻译解释',
-                        'type': 'click',
-                        'key': 'explain'
-                    },
-                    {
-                        'name': '英文表达',
-                        'type': 'click',
-                        'key': 'english_equivalent'
-                    },
-                    # {
-                    #     'name': '教我相关词',
-                    #     'type': 'click',
-                    #     'key': 'similar'
-                    # },
-                    # {
-                    #     'name': '用语音重复',
-                    #     'type': 'click',
-                    #     'key': 'voice'
-                    # }
-                ]
-            }
-		]
-	}
-
-    url = f'https://api.weixin.qq.com/cgi-bin/menu/create?access_token={access_token}'
-    response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8')).text
-    return response
-
-
-def repeat_with_voice(from_user, content):
-    audio_file = voice_assistant.text_to_speech(content)
-    access_token = get_access_token()
-    upload_audio_url = f'https://api.weixin.qq.com/cgi-bin/media/upload?access_token={access_token}&type=voice'
-    with open(audio_file, 'rb') as f:
-        send_files = {'media': ('generated.mp3', f, 'audio/mpeg')}
-        response = requests.post(upload_audio_url, files=send_files)
-    media_id = response.json().get('media_id')
-
-    url = 'https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=%s' % (access_token, )
-    data = {
-        'touser': from_user,
-        'msgtype':'voice',
-        'voice': {'media_id': media_id}
-    }
-    headers = {'Content-type': 'application/json', 'Accept': 'text/plain'}
-    response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8'), headers=headers)
-    session = db.SessionLocal()
-    user = db.get_or_create_user(session, from_user)
-    system = db.get_or_create_user(session, 'system')
-    db.log_message(session, system, user, media_id=media_id, msg_type='voice')
-    session.close()
-    bot_state_key = BOT_STATE_PREFIX + from_user
-    cache.set(bot_state_key, 'listening')
-    os.remove(audio_file)
-    return response
-
-
-openai.api_key = settings.OPENAI_API_KEY  # supply your API key however you choose
-
 from pydub import AudioSegment
-from hanziconv import HanziConv
 
-def get_voice_message(media_id):
-    access_token = get_access_token()
-    url = f'https://api.weixin.qq.com/cgi-bin/media/get?access_token={access_token}&media_id={media_id}'
-    response = requests.get(url)
-    with open('sample.amr', 'wb') as f:
-        f.write(response.content)
+APP_ID = settings.WECHAT_ADMIN_APPID
+APP_SECRET = settings.WECHAT_ADMIN_SECRET
+TOKEN_CACHE_KEY = settings.WECHAT_ADMIN_APPID + '_access_token'
 
-    amr_audio = AudioSegment.from_file('sample.amr', format='amr')
-    mp3_audio = amr_audio.export('sample.mp3', format='mp3')
-    transcript = openai.Audio.transcribe('whisper-1', mp3_audio)
-    text = transcript.get('text')
-    simplified = HanziConv.toSimplified(text)
-    print(simplified)
-    return simplified
+def _refresh_token():
+    """ IMPORTANT: This will fail if the server is not IP whitelisted """
+    s = requests.Session()
+    response = s.get('https://api.weixin.qq.com/cgi-bin/token', params={
+        'grant_type': 'client_credential',
+        'appid': APP_ID,
+        'secret': APP_SECRET,
+    }).json()
+    cache.set(TOKEN_CACHE_KEY, response['access_token'], ex=60*60*1)
+    return response['access_token']
+
+class ChatBot:
+    def __init__(self, username, db_session=None):
+        self.username = username
+        self.db_session = db_session
+        self.state_cache_key = 'state:' + self.username
+        self.attached_message_key = 'attached_msg:' + self.username
+   
+    def __repr__(self):
+        return f'<ChatBot for {self.username}>'
+    
+    @property
+    def access_token(self):
+        return cache.get(TOKEN_CACHE_KEY)
+    
+    def _validate_message(self, message):
+        # Check if the message XML is valid
+        # Common Messages: http://admin.wechat.com/wiki/index.php?title=Common_Messages
+        # Event Messages: http://admin.wechat.com/wiki/index.php?title=Event-based_Messages
+        # Speech Recognition Messages: http://admin.wechat.com/wiki/index.php?title=Speech_Recognition_Messages
+        return (
+            message != None and
+            message['xml'] != None and
+            message['xml']['MsgType'] != None and
+            message['xml']['MsgType'] == 'text' and
+            message['xml']['Content'] != None
+        )
+
+    def _format_message(self, original_message, content):
+         # Format the reply according to the WeChat XML format for synchronous replies,
+        # see: http://admin.wechat.com/wiki/index.php?title=Callback_Messages
+        return (
+            "<xml>"
+            "<ToUserName><![CDATA[%s]]></ToUserName>"
+            "<FromUserName><![CDATA[%s]]></FromUserName>"
+            "<CreateTime>%s</CreateTime>"
+            "<MsgType><![CDATA[text]]></MsgType>"
+            "<Content><![CDATA[%s]]></Content>"
+            "</xml>"
+        ) % (
+            original_message['xml']['FromUserName'],
+            original_message['xml']['ToUserName'],
+            time.gmtime(),
+            content
+        )
+    
+    @property
+    def state(self):
+        """ gets the state of the bot for a given user
+        """
+        return cache.get(self.state_cache_key)
+    
+    @state.setter
+    def state(self, value):
+        _ = cache.set(self.state_cache_key, value)
+
+    @property
+    def attached_message(self):
+        return cache.get(self.attached_message_key)
+    
+    @attached_message.setter
+    def attached_message(self, value):
+        return cache.set(self.attached_message_key, value)
+
+    def receive_message(self, message=None, media_id=None, msg_type='text'):
+        with db.SessionLocal() as session:
+            bot = db.get_or_create_user(session, 'bot')
+            user = db.get_or_create_user(session, self.username)
+            message = db.log_message(session, user, bot, content=message, media_id=media_id,msg_type=msg_type, source='user')
+        return message
+
+    def send_text_response(self, reply, original_message):
+        """
+        Send direct text response to user (not async)
+        to_user: openid of the receiver
+        
+        """
+        with db.SessionLocal() as session:
+            user = db.get_or_create_user(session, self.username)
+            system = db.get_or_create_user(session, 'system')
+            resp = self._format_message(original_message, reply)
+            db.log_message(session, system, user, content=reply, msg_type='text')
+        self.state = 'listening'
+        return Response(content=resp, status_code=200)
+
+    def send_async_text_response(self, message, send_voice=False):
+        with db.SessionLocal() as session:
+            user = db.get_or_create_user(session, self.username)
+            sender = db.get_or_create_user(session, 'bot')
+
+            tries = 1
+            # TODO: handle case after 3 unsuccessful attempts
+            while tries <= 3:
+                access_token = self.access_token
+                url = 'https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=%s' % (access_token, )
+                data = {
+                    'touser': self.username,
+                    'msgtype':'text',
+                    'text':
+                    {
+                        'content': message
+                    }
+                }
+                headers = {'Content-type': 'application/json', 'Accept': 'text/plain'}
+                response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8'), headers=headers).json()
+                if response.get('errcode') == 0:
+                    break
+                else:
+                    time.sleep(2)
+                    tries += 1
+
+            db.log_message(session, sender, user, content=message, msg_type='text')
+
+        if send_voice:
+            v_response = self.send_async_voice_response(message)
+
+        return response
+
+    def send_async_voice_response(self, message):
+        audio_file = voice_assistant.text_to_speech(message)
+        access_token = self.access_token
+        upload_audio_url = f'https://api.weixin.qq.com/cgi-bin/media/upload?access_token={access_token}&type=voice'
+        with open(audio_file, 'rb') as f:
+            send_files = {'media': (audio_file, f, 'audio/mpeg')}
+            response = requests.post(upload_audio_url, files=send_files)
+        media_id = response.json().get('media_id')
+
+        url = 'https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=%s' % (access_token, )
+        data = {
+            'touser': self.username,
+            'msgtype':'voice',
+            'voice': {'media_id': media_id}
+        }
+        headers = {'Content-type': 'application/json', 'Accept': 'text/plain'}
+        response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8'), headers=headers)
+        os.remove(audio_file)
+
+        with db.SessionLocal() as session:
+            user = db.get_or_create_user(session, self.username)
+            sender = db.get_or_create_user(session, 'bot')
+            db.log_message(session, sender, user, content=message, msg_type='voice', media_id=media_id)
+        return response
+
+    def send_busy_status(self):
+        self.state = 'busy'
+        access_token = self.access_token
+        url = 'https://api.weixin.qq.com/cgi-bin/message/custom/typing?access_token=%s' % (access_token, )
+        data = {
+            'touser': self.username,
+            'command': 'Typing'
+        }
+        headers = {'Content-type': 'application/json', 'Accept': 'text/plain'}
+        response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8'), headers=headers)
+        return response
+
+    def send_menu_message(self):
+        access_token = self.access_token
+        url = 'https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=%s' % (access_token, )
+        data = {
+            'touser': self.username,
+            'msgtype': 'msgmenu',
+            'msgmenu': {
+                'head_content': 'are you satisfied?',
+                'list': [
+                    {
+                        'id': '101',
+                        'content': 'yes'
+                    },
+                    {
+                        'id': '102',
+                        'content': 'no'
+                    }
+                ],
+                'tail_content': 'Thanks!'
+            }
+        }
+
+        headers = {'Content-type': 'application/json', 'Accept': 'text/plain'}
+        response = requests.post(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8'), headers=headers)
+        return response
+
+    def get_voice_message(self, media_id):
+        access_token = self.access_token
+        url = f'https://api.weixin.qq.com/cgi-bin/media/get?access_token={access_token}&media_id={media_id}'
+        response = requests.get(url)
+        amr_file = str(media_id) + '.amr'
+        with open(amr_file, 'wb') as f:
+            f.write(response.content)
+        return voice_assistant.transcribe_audio(amr_file)
